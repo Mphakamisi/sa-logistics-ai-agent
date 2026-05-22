@@ -19,6 +19,7 @@ interface ParsedLogisticsData {
   confidenceScore: number;
   managerAlertRequired: boolean;
   aiSummary: string;
+  driverInfo?: string | null; // Added to catch extra drift fields from the payload dynamically
 }
 
 export async function processIncomingMessage(senderNumber: string, messageBody: string) {
@@ -56,7 +57,8 @@ export async function processIncomingMessage(senderNumber: string, messageBody: 
         "status": "pending" | "in_transit" | "delivered" | "delayed" or null,
         "confidenceScore": number between 0 and 1,
         "managerAlertRequired": boolean true/false,
-        "aiSummary": string summary of actions
+        "aiSummary": string summary of actions,
+        "driverInfo": string or null
       }
 
       Raw Message Content: "${messageBody}"`,
@@ -74,21 +76,42 @@ export async function processIncomingMessage(senderNumber: string, messageBody: 
     // 3. Automation Execution Layer
     if ((parsedData.intent === 'log_delivery' || parsedData.intent === 'update_status') && parsedData.referenceNumber) {
       
+      // Step A: Extract a fallback tenant/supplier name if the incoming payload is missing one
+      const runningSupplier = parsedData.supplierName || 'Generic Logistics Hub';
+
+      // Step B: Build a flexible, preserved raw metadata object to capture schema drift 
+      // This saves the complete operational structure even if layout fields mutate over time
+      const preservedPayload = {
+        originalText: messageBody,
+        aiExtractedIntent: parsedData.intent,
+        timestamp: new Date().toISOString(),
+        ...parsedData // Spreads any unexpected extra key-values the AI parsed dynamically
+      };
+
+      // Step C: Run the multi-tenant secure upsert query mapping to the composite constraint
       const { error: upsertError } = await supabase
         .from('deliveries')
         .upsert({
+          supplier_name: runningSupplier,
           reference_number: parsedData.referenceNumber,
           item_description: parsedData.itemDescription || 'Assorted Stock',
           quantity_expected: parsedData.quantity || 0,
           current_status: parsedData.status || 'pending',
           last_ai_summary: parsedData.aiSummary,
+          assigned_driver_info: parsedData.driverInfo || null,
+          raw_payload: preservedPayload, // 🚀 Capturing flexible schema drift here
           updated_at: new Date().toISOString()
-        }, { onConflict: 'reference_number' });
+        }, { 
+          // 🛡️ Match the composite unique constraint defined in your database migration
+          onConflict: 'supplier_name,reference_number' 
+        });
 
       if (upsertError) {
         console.error('❌ Supabase Upsert Error:', upsertError.message);
         throw new Error(`Supabase Upsert Failed: ${upsertError.message}`);
       }
+
+      console.log(`\n✅ [Workflow Complete] Tenant Isolated Data Synced Fluently for: ${runningSupplier} (${parsedData.referenceNumber})`);
     }
 
     // 4. Mark log as processed by AI
