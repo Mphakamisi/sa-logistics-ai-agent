@@ -1,6 +1,6 @@
 import { GoogleGenAI } from '@google/genai';
-import { supabase } from './config/supabase';
-import { alertManager, confirmDelivery } from './services/notifier';
+import { pool } from '../config/supabase';
+import { alertManager, confirmDelivery } from './notifier';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -23,32 +23,22 @@ interface ParsedLogisticsData {
   driverInfo?: string | null;
 }
 
-interface AgentResult {
-  success: true;
-  data: ParsedLogisticsData;
-}
-
-interface AgentError {
-  success: false;
-  error: string;
-}
+interface AgentResult { success: true; data: ParsedLogisticsData; }
+interface AgentError { success: false; error: string; }
 
 export async function processIncomingMessage(
   senderNumber: string,
   messageBody: string
 ): Promise<AgentResult | AgentError> {
+  const client = await pool.connect();
   try {
     // ─── Step 1: Immutable audit trail ───────────────────────────────────────
-    const { data: rawLog, error: logError } = await supabase
-      .from('whatsapp_logs')
-      .insert([{ sender_number: senderNumber, raw_message_body: messageBody }])
-      .select()
-      .single();
-
-    if (logError) {
-      console.error('❌ Supabase Log Error:', logError.message);
-      throw new Error(`Supabase Logging Failed: ${logError.message}`);
-    }
+    const logResult = await client.query(
+      `INSERT INTO whatsapp_logs (sender_number, raw_message_body)
+       VALUES ($1, $2) RETURNING id`,
+      [senderNumber, messageBody]
+    );
+    const logId = logResult.rows[0].id;
 
     // ─── Step 2: Gemini AI parsing ────────────────────────────────────────────
     const response = await ai.models.generateContent({
@@ -77,15 +67,12 @@ export async function processIncomingMessage(
       }
 
       Raw Message Content: "${messageBody}"`,
-      config: {
-        responseMimeType: 'application/json',
-      },
+      config: { responseMimeType: 'application/json' },
     });
 
     const aiOutputText = response.text;
     if (!aiOutputText) throw new Error('Gemini returned an empty response.');
 
-    // Strip any stray markdown fences before parsing
     const cleanJson = aiOutputText.trim().replace(/^```json|^```|```$/g, '').trim();
     const parsedData: ParsedLogisticsData = JSON.parse(cleanJson);
 
@@ -95,8 +82,6 @@ export async function processIncomingMessage(
       parsedData.referenceNumber
     ) {
       const supplierName = parsedData.supplierName ?? 'Generic Logistics Hub';
-
-      // Preserve full payload to handle future schema drift gracefully
       const preservedPayload = {
         originalText: messageBody,
         aiExtractedIntent: parsedData.intent,
@@ -104,56 +89,56 @@ export async function processIncomingMessage(
         ...parsedData,
       };
 
-      const { error: upsertError } = await supabase
-        .from('deliveries')
-        .upsert(
-          {
-            supplier_name: supplierName,
-            reference_number: parsedData.referenceNumber,
-            item_description: parsedData.itemDescription ?? 'Assorted Stock',
-            quantity_expected: parsedData.quantity ?? 0,
-            current_status: parsedData.status ?? 'pending',
-            last_ai_summary: parsedData.aiSummary,
-            assigned_driver_info: parsedData.driverInfo ?? null,
-            raw_payload: preservedPayload,
-            updated_at: new Date().toISOString(),
-          },
-          { onConflict: 'supplier_name,reference_number' }
-        );
-
-      if (upsertError) {
-        console.error('❌ Supabase Upsert Error:', upsertError.message);
-        throw new Error(`Supabase Upsert Failed: ${upsertError.message}`);
-      }
-
-      console.log(
-        `✅ [DB] Synced: ${supplierName} — Ref: ${parsedData.referenceNumber} — Status: ${parsedData.status}`
+      await client.query(
+        `INSERT INTO deliveries
+           (supplier_name, reference_number, item_description, quantity_expected,
+            current_status, last_ai_summary, assigned_driver_info, raw_payload, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now())
+         ON CONFLICT (supplier_name, reference_number)
+         DO UPDATE SET
+           item_description = EXCLUDED.item_description,
+           quantity_expected = EXCLUDED.quantity_expected,
+           current_status = EXCLUDED.current_status,
+           last_ai_summary = EXCLUDED.last_ai_summary,
+           assigned_driver_info = EXCLUDED.assigned_driver_info,
+           raw_payload = EXCLUDED.raw_payload,
+           updated_at = now()`,
+        [
+          supplierName,
+          parsedData.referenceNumber,
+          parsedData.itemDescription ?? 'Assorted Stock',
+          parsedData.quantity ?? 0,
+          parsedData.status ?? 'pending',
+          parsedData.aiSummary,
+          parsedData.driverInfo ?? null,
+          JSON.stringify(preservedPayload),
+        ]
       );
 
-      // ─── Step 4: Outbound notifications (client summons) ───────────────────
+      console.log(`✅ [DB] Synced: ${supplierName} — Ref: ${parsedData.referenceNumber}`);
 
-      // 4a. Manager alert — fires when AI flags something critical
+      // ─── Step 4: Outbound notifications ──────────────────────────────────────
       if (parsedData.managerAlertRequired) {
         console.log('🚨 [Notifier] Manager alert triggered.');
         await alertManager(supplierName, parsedData.referenceNumber, parsedData.aiSummary);
       }
-
-      // 4b. Delivery confirmation — fires when a delivery is marked as delivered
       if (parsedData.status === 'delivered') {
-        console.log('📤 [Notifier] Sending delivery confirmation to sender.');
+        console.log('📤 [Notifier] Sending delivery confirmation.');
         await confirmDelivery(senderNumber, parsedData.referenceNumber, supplierName);
       }
     }
 
-    // ─── Step 5: Mark log entry as processed ─────────────────────────────────
-    await supabase
-      .from('whatsapp_logs')
-      .update({ processed_by_ai: true })
-      .eq('id', rawLog.id);
+    // ─── Step 5: Mark log as processed ───────────────────────────────────────
+    await client.query(
+      `UPDATE whatsapp_logs SET processed_by_ai = true WHERE id = $1`,
+      [logId]
+    );
 
     return { success: true, data: parsedData };
   } catch (error) {
     console.error('\n🚨 [CRITICAL AGENT ERROR]:', error);
     return { success: false, error: (error as Error).message };
+  } finally {
+    client.release();
   }
 }

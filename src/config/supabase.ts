@@ -1,12 +1,11 @@
-import { createClient } from '@supabase/supabase-js';
+import { Pool } from 'pg';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+if (!process.env.DATABASE_URL) throw new Error('Missing DATABASE_URL env var.');
 
-if (!supabaseUrl) throw new Error('Missing SUPABASE_URL in your .env file.');
-if (!supabaseKey) throw new Error('Missing SUPABASE_SERVICE_ROLE_KEY in your .env file.');
-
-export const supabase = createClient(supabaseUrl, supabaseKey);
+export const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
