@@ -3,9 +3,13 @@
   "version": "1.0.0",
   "description": "Autonomous AI Logistics & Inventory Agent for South African SMEs",
   "main": "dist/index.js",
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=10.0.0"
+  },
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc",
+    "build": "npx tsc",
     "start": "node dist/index.js"
   },
   "keywords": ["logistics", "ai", "whatsapp", "south-africa", "sme"],
