@@ -1,6 +1,6 @@
 import { GoogleGenAI } from '@google/genai';
-import { pool } from '../config/supabase';
-import { alertManager, confirmDelivery } from './notifier';
+import { pool } from './config/supabase';
+import { alertManager, confirmDelivery } from './services/notifier';
 import dotenv from 'dotenv';
 
 dotenv.config();
