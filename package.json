@@ -2,14 +2,14 @@
   "name": "sa-logistics-ai-agent",
   "version": "1.0.0",
   "description": "Autonomous AI Logistics & Inventory Agent for South African SMEs",
-  "main": "src/index.ts",
+  "main": "dist/index.js",
   "engines": {
     "node": ">=20.0.0"
   },
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "build": "npx tsc",
-    "start": "npx tsx src/index.ts"
+    "dev": "node node_modules/tsx/dist/cli.mjs watch src/index.ts",
+    "build": "node node_modules/typescript/bin/tsc",
+    "start": "node dist/index.js"
   },
   "keywords": ["logistics", "ai", "whatsapp", "south-africa", "sme"],
   "author": "Mphakamisi Ngidi",
